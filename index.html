@@ -6126,12 +6126,16 @@ function deletePelumasRecord(id, target) {
   render();
 }
 </script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // ============================================================
-// TYRETRACK — DATABASE & AUTH SYSTEM (localStorage)
+// TYRETRACK — DATABASE & AUTH SYSTEM (Supabase)
 // ============================================================
 
-const DB_KEY = 'tyretrack_db';
+const SUPABASE_URL = 'https://miptmwevpsfaaggypwdp.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_1Qo7BI_cDEnb_5EquHURFg_KW9SUglg';
+const supa = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
 const SESSION_KEY = 'tyretrack_session';
 
 // ---- Default demo users ----
@@ -6144,6 +6148,83 @@ const DEFAULT_USERS = [
   { id: 'u6', name: 'Sales Counter',    email: 'counter@tyretrack.id',     password: 'counter123', role: 'sales_counter',     color: '#9d174d', initial: 'C' },
 ];
 
+// ---- Supabase helpers ----
+async function supaUpsert(table, id, data) {
+  try {
+    await supa.from(table).upsert({ id: String(id), data: data });
+  } catch(e) { console.warn('supaUpsert error', table, e); }
+}
+async function supaDelete(table, id) {
+  try {
+    await supa.from(table).delete().eq('id', String(id));
+  } catch(e) { console.warn('supaDelete error', table, e); }
+}
+async function supaLoadAll(table) {
+  try {
+    const { data } = await supa.from(table).select('*');
+    return (data || []).map(r => r.data);
+  } catch(e) { return []; }
+}
+
+// ---- Sync all state to Supabase ----
+async function syncToSupabase() {
+  try {
+    const tbls = [
+      ['vehicles', typeof vehicles !== 'undefined' ? vehicles : []],
+      ['trial_vehicles', typeof trialVehicles !== 'undefined' ? trialVehicles : []],
+      ['alerts', typeof alerts !== 'undefined' ? alerts : []],
+      ['claims', typeof claims !== 'undefined' ? claims : []],
+      ['pelumas_records', typeof pelumasRecords !== 'undefined' ? pelumasRecords : []],
+      ['pelumas_trial_records', typeof pelumasTrialRecords !== 'undefined' ? pelumasTrialRecords : []],
+      ['duty_trips', typeof dutyTrips !== 'undefined' ? dutyTrips : []],
+      ['closing_history', typeof closingHistory !== 'undefined' ? closingHistory : []],
+    ];
+    for (const [tbl, arr] of tbls) {
+      for (const item of arr) {
+        if (item && item.id) await supaUpsert(tbl, item.id, item);
+      }
+    }
+  } catch(e) { console.warn('syncToSupabase error', e); }
+}
+
+// ---- Load all state from Supabase ----
+async function loadFromSupabase() {
+  try {
+    const [v, tv, al, cl, pr, ptr, dt, ch] = await Promise.all([
+      supaLoadAll('vehicles'),
+      supaLoadAll('trial_vehicles'),
+      supaLoadAll('alerts'),
+      supaLoadAll('claims'),
+      supaLoadAll('pelumas_records'),
+      supaLoadAll('pelumas_trial_records'),
+      supaLoadAll('duty_trips'),
+      supaLoadAll('closing_history'),
+    ]);
+    if (v.length  && typeof vehicles !== 'undefined') vehicles = v;
+    if (tv.length && typeof trialVehicles !== 'undefined') trialVehicles = tv;
+    if (al.length && typeof alerts !== 'undefined') alerts = al;
+    if (cl.length && typeof claims !== 'undefined') claims = cl;
+    if (pr.length && typeof pelumasRecords !== 'undefined') pelumasRecords = pr;
+    if (ptr.length && typeof pelumasTrialRecords !== 'undefined') pelumasTrialRecords = ptr;
+    if (dt.length && typeof dutyTrips !== 'undefined') dutyTrips = dt;
+    if (ch.length && typeof closingHistory !== 'undefined') closingHistory = ch;
+    return true;
+  } catch(e) { return false; }
+}
+
+// ---- Load users from Supabase (fallback to default) ----
+async function supaGetUsers() {
+  try {
+    const { data } = await supa.from('users').select('*');
+    if (data && data.length > 0) return data;
+    // Seed default users if none
+    for (const u of DEFAULT_USERS) {
+      await supa.from('users').upsert(u);
+    }
+    return DEFAULT_USERS;
+  } catch(e) { return DEFAULT_USERS; }
+}
+
 const ROLE_LABELS = {
   administrator: 'Administrator',
   supervisor: 'Supervisor',
@@ -6152,32 +6233,6 @@ const ROLE_LABELS = {
   sales_counter: 'Sales Counter',
   viewer: 'Viewer',
 };
-
-// ---- DB helpers ----
-function dbLoad() {
-  try {
-    const raw = localStorage.getItem(DB_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch(e) { return null; }
-}
-function dbSave(db) {
-  localStorage.setItem(DB_KEY, JSON.stringify(db));
-}
-function dbInit() {
-  let db = dbLoad();
-  if (!db) {
-    db = { users: DEFAULT_USERS, meta: { created: new Date().toISOString(), version: 1 } };
-    dbSave(db);
-  } else {
-    // Ensure default users always exist (reset password not stored externally)
-    DEFAULT_USERS.forEach(du => {
-      if (!db.users.find(u => u.id === du.id)) db.users.push(du);
-    });
-    dbSave(db);
-  }
-  return db;
-}
-function dbGetUsers() { return (dbLoad() || { users: DEFAULT_USERS }).users; }
 
 // ---- Session ----
 function sessionGet() {
@@ -6194,13 +6249,13 @@ function loginAs(email, password) {
   doLogin();
 }
 
-function doLogin() {
+async function doLogin() {
   const email    = document.getElementById('login-email').value.trim().toLowerCase();
   const password = document.getElementById('login-password').value;
   const errorEl  = document.getElementById('login-error');
   errorEl.classList.remove('show');
 
-  const users = dbGetUsers();
+  const users = await supaGetUsers();
   const user  = users.find(u => u.email.toLowerCase() === email && u.password === password);
   if (!user) {
     errorEl.classList.add('show');
@@ -6209,6 +6264,10 @@ function doLogin() {
   }
 
   sessionSet(user);
+
+  // Load data from Supabase
+  await loadFromSupabase();
+
   applySession(user);
 
   const loginPage = document.getElementById('login-page');
@@ -6219,7 +6278,7 @@ function doLogin() {
   // Show DB info bar
   document.getElementById('db-info-bar').classList.add('show');
   document.getElementById('db-info-text').textContent =
-    `Database: localStorage (Demo) · Pengguna: ${user.name} (${ROLE_LABELS[user.role] || user.role}) · Data tersimpan di browser`;
+    `Database: Supabase ☁️ · Pengguna: ${user.name} (${ROLE_LABELS[user.role] || user.role}) · Data tersimpan online`;
 
   // Shift app down for info bar
   document.getElementById('app').style.paddingTop = '38px';
@@ -6318,25 +6377,33 @@ function applySession(user) {
 
 // ---- Export / Reset DB ----
 function exportDB() {
-  const db = dbLoad();
-  if (!db) { alert('Tidak ada data tersimpan.'); return; }
-  const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+  const state = {
+    vehicles: typeof vehicles !== 'undefined' ? vehicles : [],
+    trialVehicles: typeof trialVehicles !== 'undefined' ? trialVehicles : [],
+    alerts: typeof alerts !== 'undefined' ? alerts : [],
+    claims: typeof claims !== 'undefined' ? claims : [],
+    pelumasRecords: typeof pelumasRecords !== 'undefined' ? pelumasRecords : [],
+    pelumasTrialRecords: typeof pelumasTrialRecords !== 'undefined' ? pelumasTrialRecords : [],
+    dutyTrips: typeof dutyTrips !== 'undefined' ? dutyTrips : [],
+    closingHistory: typeof closingHistory !== 'undefined' ? closingHistory : [],
+  };
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'tyretrack_db_' + new Date().toISOString().split('T')[0] + '.json';
+  a.download = 'tyretrack_backup_' + new Date().toISOString().split('T')[0] + '.json';
   a.click();
 }
-function clearDB() {
-  if (!confirm('Reset semua data database? (Akun demo tidak akan terhapus)')) return;
-  localStorage.removeItem(DB_KEY);
-  dbInit();
+async function clearDB() {
+  if (!confirm('Reset semua data database?')) return;
+  const tables = ['vehicles','trial_vehicles','alerts','claims','pelumas_records','pelumas_trial_records','duty_trips','closing_history'];
+  for (const t of tables) await supa.from(t).delete().neq('id','__never__');
   alert('Database telah direset. Halaman akan dimuat ulang.');
   location.reload();
 }
 
-// ---- Patch: save vehicles/tires to localStorage on each render ----
-// Wrap the existing render() and related state-changing functions to persist data
+// ---- Patch: sync to Supabase on each render ----
 function persistState() {
+  // Also keep localStorage as fallback
   try {
     const state = {
       vehicles: typeof vehicles !== 'undefined' ? vehicles : [],
@@ -6350,6 +6417,8 @@ function persistState() {
     };
     localStorage.setItem('tyretrack_state', JSON.stringify(state));
   } catch(e) {}
+  // Sync to Supabase (non-blocking)
+  syncToSupabase().catch(e => console.warn('sync error', e));
 }
 
 function loadPersistedState() {
@@ -6370,22 +6439,26 @@ function loadPersistedState() {
 }
 
 // ---- INIT on page load ----
-(function init() {
-  dbInit();
+(async function init() {
+  // Seed default users to Supabase
+  await supaGetUsers();
 
   const session = sessionGet();
   if (!session) { document.body.classList.add('login-active'); }
   if (session) {
-    // Already logged in — hide login page immediately
     const lp = document.getElementById('login-page');
     lp.style.display = 'none';
     document.getElementById('db-info-bar').classList.add('show');
     document.getElementById('db-info-text').textContent =
-      `Database: localStorage (Demo) · Pengguna: ${session.name} (${ROLE_LABELS[session.role] || session.role}) · Data tersimpan di browser`;
+      `Database: Supabase ☁️ · Pengguna: ${session.name} (${ROLE_LABELS[session.role] || session.role}) · Data tersimpan online`;
     document.getElementById('app').style.paddingTop = '38px';
-    // Apply session(user);
+    // Load from Supabase first, fallback to localStorage
+    const loaded = await loadFromSupabase();
+    if (!loaded) loadPersistedState();
+    applySession(session);
+  } else {
+    loadPersistedState();
   }
-  loadPersistedState();
   if (typeof render === 'function') render();
   const _origRender = render;
   render = function() { _origRender(); persistState(); };
